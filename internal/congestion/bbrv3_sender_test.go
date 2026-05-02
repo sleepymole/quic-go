@@ -65,16 +65,34 @@ func TestBBRv3SenderLeavesStartupForProbeBW(t *testing.T) {
 	require.NotZero(t, s.sender.maxBandwidth)
 }
 
-func TestBBRv3SenderBoundsInflightOnHighLoss(t *testing.T) {
+func TestBBRv3SenderUsesBBRWindows(t *testing.T) {
+	s := newTestBBRv3Sender()
+
+	require.Equal(t, bbrv3InitialCongestionWindowPackets*maxDatagramSize, s.sender.initialCongestionWindow())
+	require.Equal(t, bbrv3MinCongestionWindowPackets*maxDatagramSize, s.sender.minCongestionWindow())
+	require.Equal(t, s.sender.initialCongestionWindow(), s.sender.GetCongestionWindow())
+}
+
+func TestBBRv3SenderIgnoresRandomLossBelowThreshold(t *testing.T) {
 	s := newTestBBRv3Sender()
 	s.sender.enterProbeBW(bbrv3ProbeBWUp, s.clock.Now())
 	priorInFlight := 100 * maxDatagramSize
 
-	s.sender.OnCongestionEvent(1, 3*maxDatagramSize, priorInFlight)
+	s.sender.OnCongestionEvent(1, 10*maxDatagramSize, priorInFlight)
+
+	require.Equal(t, bbrv3ProbeBWUp, s.sender.mode)
+	require.Equal(t, s.sender.initialCongestionWindow(), s.sender.GetCongestionWindow())
+}
+
+func TestBBRv3SenderLeavesProbeBWUpOnHighLoss(t *testing.T) {
+	s := newTestBBRv3Sender()
+	s.sender.enterProbeBW(bbrv3ProbeBWUp, s.clock.Now())
+	priorInFlight := 100 * maxDatagramSize
+
+	s.sender.OnCongestionEvent(1, 25*maxDatagramSize, priorInFlight)
 
 	require.Equal(t, bbrv3ProbeBWDown, s.sender.mode)
-	require.Less(t, s.sender.inflightHigh, priorInFlight)
-	require.GreaterOrEqual(t, s.sender.inflightHigh, s.sender.minCongestionWindow())
+	require.Equal(t, s.sender.initialCongestionWindow(), s.sender.GetCongestionWindow())
 }
 
 func TestBBRv3SenderProbeRTT(t *testing.T) {

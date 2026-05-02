@@ -479,6 +479,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	if ackedBytes > 0 {
 		h.delivered += ackedBytes
 		h.deliveredTime = rcvTime
+		h.firstSentTime = 0
 		if useRateSample {
 			rateAware.OnPacketAckedWithRateSample(
 				ackedBytes,

@@ -23,9 +23,13 @@ const (
 
 	bbrv3FullBandwidthRounds = 3
 	bbrv3FullBandwidthGain   = 1.25
-	bbrv3MinRTTWindow        = 10 * time.Second
+	bbrv3MinRTTWindow        = time.Minute
 	bbrv3ProbeRTTDuration    = 200 * time.Millisecond
-	bbrv3LossThreshold       = 0.02
+	bbrv3LossThreshold       = 0.20
+
+	bbrv3InitialCongestionWindowPackets = 128
+	bbrv3MinCongestionWindowPackets     = 32
+	bbrv3PacingMargin                   = 1.25
 )
 
 type bbrv3Mode uint8
@@ -91,7 +95,6 @@ type bbrv3Sender struct {
 	fullBandwidthCount int
 	fullBandwidthFound bool
 
-	inflightHigh     protocol.ByteCount
 	lostBytesInRound protocol.ByteCount
 
 	probeRTTDone  monotime.Time
@@ -123,9 +126,9 @@ func NewBBRv3Sender(
 		pacingGain:       bbrv3StartupPacingGain,
 		cwndGain:         bbrv3StartupCwndGain,
 		maxDatagramSize:  initialMaxDatagramSize,
-		congestionWindow: initialCongestionWindow * initialMaxDatagramSize,
+		congestionWindow: bbrv3InitialCongestionWindowPackets * initialMaxDatagramSize,
 	}
-	b.pacingRate = b.initialPacingRate()
+	b.pacingRate = bandwidthTimesGain(b.initialPacingRate(), bbrv3StartupPacingGain)
 	b.pacer = newPacerWithAdjustedBandwidth(func() uint64 {
 		rate := b.pacingRate
 		if rate == 0 {
@@ -135,7 +138,7 @@ func NewBBRv3Sender(
 		if bytesPerSecond == 0 {
 			return uint64(initialMaxDatagramSize)
 		}
-		return bytesPerSecond
+		return uint64(float64(bytesPerSecond) * bbrv3PacingMargin)
 	})
 	b.maybeQlogStateChange(b.mode)
 	return b
@@ -240,11 +243,8 @@ func (b *bbrv3Sender) OnCongestionEvent(
 		return
 	}
 	lossRate := float64(b.lostBytesInRound) / float64(priorInFlight)
-	if lossRate >= bbrv3LossThreshold {
-		b.boundInflight(priorInFlight - min(priorInFlight, b.lostBytesInRound))
-		if b.mode == bbrv3ProbeBWUp {
-			b.enterProbeBW(bbrv3ProbeBWDown, b.clock.Now())
-		}
+	if lossRate >= bbrv3LossThreshold && b.mode == bbrv3ProbeBWUp {
+		b.enterProbeBW(bbrv3ProbeBWDown, b.clock.Now())
 	}
 }
 
@@ -365,9 +365,6 @@ func (b *bbrv3Sender) updateCongestionWindow(ackedBytes protocol.ByteCount) {
 	} else if b.mode == bbrv3ProbeRTT && b.congestionWindow > target {
 		b.congestionWindow = target
 	}
-	if b.inflightHigh > 0 && b.congestionWindow > b.inflightHigh {
-		b.congestionWindow = b.inflightHigh
-	}
 	if minCwnd := b.minCongestionWindow(); b.congestionWindow < minCwnd {
 		b.congestionWindow = minCwnd
 	}
@@ -392,8 +389,8 @@ func (b *bbrv3Sender) checkLossRound(sample RateSample) {
 	if denominator == 0 {
 		denominator = b.targetInflight(1.0)
 	}
-	if denominator > 0 && float64(b.lostBytesInRound)/float64(denominator) >= bbrv3LossThreshold {
-		b.boundInflight(denominator - min(denominator, b.lostBytesInRound))
+	if denominator > 0 && float64(b.lostBytesInRound)/float64(denominator) >= bbrv3LossThreshold && b.mode == bbrv3ProbeBWUp {
+		b.enterProbeBW(bbrv3ProbeBWDown, sample.Time)
 	}
 	b.lostBytesInRound = 0
 }
@@ -461,15 +458,6 @@ func (b *bbrv3Sender) enterMode(mode bbrv3Mode) {
 	b.maybeQlogStateChange(mode)
 }
 
-func (b *bbrv3Sender) boundInflight(bound protocol.ByteCount) {
-	if minCwnd := b.minCongestionWindow(); bound < minCwnd {
-		bound = minCwnd
-	}
-	if b.inflightHigh == 0 || bound < b.inflightHigh {
-		b.inflightHigh = bound
-	}
-}
-
 func (b *bbrv3Sender) targetInflight(gain float64) protocol.ByteCount {
 	if b.maxBandwidth == 0 || b.minRTT <= 0 {
 		return b.initialCongestionWindow()
@@ -492,11 +480,11 @@ func (b *bbrv3Sender) initialPacingRate() Bandwidth {
 }
 
 func (b *bbrv3Sender) initialCongestionWindow() protocol.ByteCount {
-	return initialCongestionWindow * b.maxDatagramSize
+	return bbrv3InitialCongestionWindowPackets * b.maxDatagramSize
 }
 
 func (b *bbrv3Sender) minCongestionWindow() protocol.ByteCount {
-	return minCongestionWindowPackets * b.maxDatagramSize
+	return bbrv3MinCongestionWindowPackets * b.maxDatagramSize
 }
 
 func (b *bbrv3Sender) maybeQlogStateChange(mode bbrv3Mode) {

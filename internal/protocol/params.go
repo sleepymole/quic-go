@@ -76,9 +76,9 @@ const MaxTrackedSentPackets = MaxOutstandingSentPackets * 5 / 4
 // but no ack-eliciting frames, that we send in a row
 const MaxNonAckElicitingAcks = 19
 
-// MaxStreamFrameSorterGaps is the maximum number of gaps between received StreamFrames
-// prevents DoS attacks against the streamFrameSorter
-const MaxStreamFrameSorterGaps = 1000
+// MaxStreamFrameSorterGaps is the maximum number of gaps between received StreamFrames.
+// It prevents DoS attacks against the streamFrameSorter.
+const MaxStreamFrameSorterGaps = 16 * 1024
 
 // MinStreamFrameBufferSize is the minimum data length of a received STREAM frame
 // that we use the buffer for. This protects against a DoS where an attacker would send us
