@@ -88,10 +88,14 @@ type sentPacketHandler struct {
 	ackedPackets []packetWithPacketNumber // to avoid allocations in detectAndRemoveAckedPackets
 
 	bytesInFlight protocol.ByteCount
+	delivered     protocol.ByteCount
+	deliveredTime monotime.Time
+	firstSentTime monotime.Time
 
-	congestion congestion.SendAlgorithmWithDebugInfos
-	rttStats   *utils.RTTStats
-	connStats  *utils.ConnectionStats
+	congestion        congestion.SendAlgorithmWithDebugInfos
+	congestionControl string
+	rttStats          *utils.RTTStats
+	connStats         *utils.ConnectionStats
 
 	// The number of times a PTO has been sent without receiving an ack.
 	ptoCount uint32
@@ -115,8 +119,11 @@ type sentPacketHandler struct {
 
 var _ SentPacketHandler = &sentPacketHandler{}
 
-// clientAddressValidated indicates whether the address was validated beforehand by an address validation token.
-// If the address was validated, the amplification limit doesn't apply. It has no effect for a client.
+// NewSentPacketHandler creates a packet handler using the selected congestion
+// controller. clientAddressValidated indicates whether the address was
+// validated beforehand by an address validation token. If the address was
+// validated, the amplification limit doesn't apply. It has no effect for a
+// client.
 func NewSentPacketHandler(
 	initialPN protocol.PacketNumber,
 	initialMaxDatagramSize protocol.ByteCount,
@@ -128,16 +135,15 @@ func NewSentPacketHandler(
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
+	congestionControl string,
 ) SentPacketHandler {
-	congestion := congestion.NewCubicSender(
-		congestion.DefaultClock{},
+	congestion := congestion.NewSendAlgorithm(
+		congestionControl,
 		rttStats,
 		connStats,
 		initialMaxDatagramSize,
-		true, // use Reno
 		qlogger,
 	)
-
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
 		peerAddressValidated:           pers == protocol.PerspectiveClient || clientAddressValidated,
@@ -148,6 +154,7 @@ func NewSentPacketHandler(
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     congestion,
+		congestionControl:              congestionControl,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -166,6 +173,9 @@ func (h *sentPacketHandler) removeFromBytesInFlight(p *packet) {
 			panic("negative bytes_in_flight")
 		}
 		h.bytesInFlight -= p.Length
+		if h.bytesInFlight == 0 {
+			h.firstSentTime = 0
+		}
 		p.includedInBytesInFlight = false
 	}
 }
@@ -291,6 +301,15 @@ func (h *sentPacketHandler) SentPacket(
 	}
 	if isAckEliciting {
 		pnSpace.lastAckElicitingPacketTime = t
+		if h.deliveredTime.IsZero() {
+			h.deliveredTime = t
+		}
+		if h.firstSentTime.IsZero() {
+			h.firstSentTime = t
+		}
+		p.Delivered = h.delivered
+		p.DeliveredTime = h.deliveredTime
+		p.FirstSentTime = h.firstSentTime
 		h.bytesInFlight += size
 		p.includedInBytesInFlight = true
 		if h.numProbesToSend > 0 {
@@ -436,9 +455,18 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		h.detectLostPathProbes(rcvTime)
 	}
 	var acked1RTTPacket bool
+	var ackedBytes protocol.ByteCount
+	var samplePacket packetWithPacketNumber
+	rateAware, useRateSample := h.congestion.(congestion.RateSampleAware)
 	for _, p := range ackedPackets {
 		if p.includedInBytesInFlight {
-			h.congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime)
+			if ackedBytes == 0 || p.Delivered > samplePacket.Delivered {
+				samplePacket = p
+			}
+			ackedBytes += p.Length
+			if !useRateSample {
+				h.congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime)
+			}
 		}
 		if p.EncryptionLevel == protocol.Encryption1RTT {
 			acked1RTTPacket = true
@@ -446,6 +474,16 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		h.removeFromBytesInFlight(p.packet)
 		if !p.isPathProbePacket {
 			putPacket(p.packet)
+		}
+	}
+	if ackedBytes > 0 {
+		h.delivered += ackedBytes
+		h.deliveredTime = rcvTime
+		if useRateSample {
+			rateAware.OnPacketAckedWithRateSample(
+				ackedBytes,
+				h.rateSampleForPacket(samplePacket, priorInFlight, rcvTime),
+			)
 		}
 	}
 
@@ -613,6 +651,25 @@ func (h *sentPacketHandler) detectAndRemoveAckedPackets(
 	}
 	// TODO: add support for the transport:packets_acked qlog event
 	return h.ackedPackets, hasAckEliciting, nil
+}
+
+func (h *sentPacketHandler) rateSampleForPacket(
+	p packetWithPacketNumber,
+	priorInFlight protocol.ByteCount,
+	rcvTime monotime.Time,
+) congestion.RateSample {
+	sendElapsed := p.SendTime.Sub(p.FirstSentTime)
+	ackElapsed := rcvTime.Sub(p.DeliveredTime)
+	return congestion.RateSample{
+		Time:           rcvTime,
+		PriorDelivered: p.Delivered,
+		TotalDelivered: h.delivered,
+		Delivered:      h.delivered - p.Delivered,
+		Interval:       max(sendElapsed, ackElapsed),
+		RTT:            h.rttStats.LatestRTT(),
+		PriorInFlight:  priorInFlight,
+		BytesInFlight:  h.bytesInFlight,
+	}
 }
 
 func (h *sentPacketHandler) getLossTimeAndSpace() (monotime.Time, protocol.EncryptionLevel) {
@@ -1119,6 +1176,9 @@ func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
 
 func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSize protocol.ByteCount) {
 	h.rttStats.ResetForPathMigration()
+	h.delivered = 0
+	h.deliveredTime = now
+	h.firstSentTime = 0
 	for pn, p := range h.appDataPackets.history.Packets() {
 		h.appDataPackets.history.DeclareLost(pn)
 		if !p.isPathProbePacket {
@@ -1131,12 +1191,11 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	for pn := range h.appDataPackets.history.PathProbes() {
 		h.appDataPackets.history.RemovePathProbe(pn)
 	}
-	h.congestion = congestion.NewCubicSender(
-		congestion.DefaultClock{},
+	h.congestion = congestion.NewSendAlgorithm(
+		h.congestionControl,
 		h.rttStats,
 		h.connStats,
 		initialMaxDatagramSize,
-		true, // use Reno
 		h.qlogger,
 	)
 	h.setLossDetectionTimer(now)

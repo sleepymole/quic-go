@@ -19,17 +19,21 @@ type pacer struct {
 }
 
 func newPacer(getBandwidth func() Bandwidth) *pacer {
+	return newPacerWithAdjustedBandwidth(func() uint64 {
+		// Bandwidth is in bits/s. We need the value in bytes/s.
+		bw := uint64(getBandwidth() / BytesPerSecond)
+		// Use a slightly higher value than the actual measured bandwidth.
+		// RTT variations then won't result in under-utilization of the congestion window.
+		// Ultimately, this will result in sending packets as acknowledgments are received rather than when timers fire,
+		// provided the congestion window is fully utilized and acknowledgments arrive at regular intervals.
+		return bw * 5 / 4
+	})
+}
+
+func newPacerWithAdjustedBandwidth(adjustedBandwidth func() uint64) *pacer {
 	p := &pacer{
-		maxDatagramSize: initialMaxDatagramSize,
-		adjustedBandwidth: func() uint64 {
-			// Bandwidth is in bits/s. We need the value in bytes/s.
-			bw := uint64(getBandwidth() / BytesPerSecond)
-			// Use a slightly higher value than the actual measured bandwidth.
-			// RTT variations then won't result in under-utilization of the congestion window.
-			// Ultimately, this will result in sending packets as acknowledgments are received rather than when timers fire,
-			// provided the congestion window is fully utilized and acknowledgments arrive at regular intervals.
-			return bw * 5 / 4
-		},
+		maxDatagramSize:   initialMaxDatagramSize,
+		adjustedBandwidth: adjustedBandwidth,
 	}
 	p.budgetAtLastSent = p.maxBurstSize()
 	return p

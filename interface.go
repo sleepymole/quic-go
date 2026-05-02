@@ -92,6 +92,18 @@ type ConnectionIDGenerator interface {
 	ConnectionIDLen() int
 }
 
+// CongestionControl selects the congestion controller used by a connection.
+type CongestionControl string
+
+const (
+	// CongestionControlReno uses the QUIC RFC 9002 NewReno-style controller.
+	CongestionControlReno CongestionControl = "reno"
+	// CongestionControlCubic uses the Cubic controller.
+	CongestionControlCubic CongestionControl = "cubic"
+	// CongestionControlBBRv3 uses an experimental BBRv3 controller.
+	CongestionControlBBRv3 CongestionControl = "bbrv3"
+)
+
 // Config contains all configuration data needed for a QUIC server or client.
 type Config struct {
 	// GetConfigForClient is called for incoming connections.
@@ -116,6 +128,9 @@ type Config struct {
 	// The key used to store tokens is the ServerName from the tls.Config, if set
 	// otherwise the token is associated with the server's IP address.
 	TokenStore TokenStore
+	// CongestionControl selects the congestion controller.
+	// If not set, CongestionControlReno is used to preserve the default behavior.
+	CongestionControl CongestionControl
 	// InitialStreamReceiveWindow is the initial size of the stream-level flow control window for receiving data.
 	// If the application is consuming data quickly enough, the flow control auto-tuning algorithm
 	// will increase the window up to MaxStreamReceiveWindow.

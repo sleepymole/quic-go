@@ -51,6 +51,11 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("invalid QUIC version: %s", v)
 		}
 	}
+	switch config.CongestionControl {
+	case "", CongestionControlReno, CongestionControlCubic, CongestionControlBBRv3:
+	default:
+		return fmt.Errorf("invalid congestion control: %s", config.CongestionControl)
+	}
 	return nil
 }
 
@@ -104,6 +109,10 @@ func populateConfig(config *Config) *Config {
 	if initialPacketSize == 0 {
 		initialPacketSize = protocol.InitialPacketSize
 	}
+	congestionControl := config.CongestionControl
+	if congestionControl == "" {
+		congestionControl = CongestionControlReno
+	}
 
 	return &Config{
 		GetConfigForClient:               config.GetConfigForClient,
@@ -111,6 +120,7 @@ func populateConfig(config *Config) *Config {
 		HandshakeIdleTimeout:             handshakeIdleTimeout,
 		MaxIdleTimeout:                   idleTimeout,
 		KeepAlivePeriod:                  config.KeepAlivePeriod,
+		CongestionControl:                congestionControl,
 		InitialStreamReceiveWindow:       initialStreamReceiveWindow,
 		MaxStreamReceiveWindow:           maxStreamReceiveWindow,
 		InitialConnectionReceiveWindow:   initialConnectionReceiveWindow,

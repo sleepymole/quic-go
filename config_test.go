@@ -65,6 +65,13 @@ func TestConfigValidation(t *testing.T) {
 		require.NoError(t, validateConfig(conf))
 		require.Equal(t, uint16(protocol.MaxPacketBufferSize), conf.InitialPacketSize)
 	})
+
+	t.Run("congestion control", func(t *testing.T) {
+		require.NoError(t, validateConfig(&Config{CongestionControl: CongestionControlReno}))
+		require.NoError(t, validateConfig(&Config{CongestionControl: CongestionControlCubic}))
+		require.NoError(t, validateConfig(&Config{CongestionControl: CongestionControlBBRv3}))
+		require.Error(t, validateConfig(&Config{CongestionControl: "vegas"}))
+	})
 }
 
 func TestConfigHandshakeIdleTimeout(t *testing.T) {
@@ -100,6 +107,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(time.Hour))
 		case "TokenStore":
 			f.Set(reflect.ValueOf(NewLRUTokenStore(2, 3)))
+		case "CongestionControl":
+			f.Set(reflect.ValueOf(CongestionControlBBRv3))
 		case "InitialStreamReceiveWindow":
 			f.Set(reflect.ValueOf(uint64(1234)))
 		case "MaxStreamReceiveWindow":
@@ -184,6 +193,7 @@ func TestConfigDefaultValues(t *testing.T) {
 	require.EqualValues(t, protocol.DefaultMaxReceiveConnectionFlowControlWindow, c.MaxConnectionReceiveWindow)
 	require.EqualValues(t, protocol.DefaultMaxIncomingStreams, c.MaxIncomingStreams)
 	require.EqualValues(t, protocol.DefaultMaxIncomingUniStreams, c.MaxIncomingUniStreams)
+	require.Equal(t, CongestionControlReno, c.CongestionControl)
 	require.False(t, c.DisablePathMTUDiscovery)
 	require.Nil(t, c.GetConfigForClient)
 }
